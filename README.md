@@ -1,4 +1,4 @@
-# Netro Smart Garden Integration for Home Assistant V2 API ONLY
+# Netro Smart Garden (V2 API ONLY) Integration for Home Assistant 
 
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/custom-components/hacs) [![CI](https://github.com/kcofoni/ha-netro-watering/workflows/CI/badge.svg)](https://github.com/kcofoni/ha-netro-watering/actions) [![codecov](https://codecov.io/gh/kcofoni/ha-netro-watering/branch/main/graph/badge.svg)](https://codecov.io/gh/kcofoni/ha-netro-watering) [![GitHub release](https://img.shields.io/github/v/release/kcofoni/ha-netro-watering)](https://github.com/kcofoni/ha-netro-watering/releases) [![GitHub beta](https://img.shields.io/github/v/tag/kcofoni/ha-netro-watering?label=beta&color=orange)](https://github.com/kcofoni/ha-netro-watering/releases)
@@ -18,9 +18,9 @@
 - [☕ Support](#support)
 
 ## ℹ️ About
-Home Assistant integration for Netro Smart Garden devices. It lets you manage Netro controllers and soil sensors to monitor conditions, control zones, and automate watering from Home Assistant.
+This integration has been forked from the original Netro Watering integration by kcofoni (https://github.com/kcofoni/ha-netro-watering).  Newer Netro Devices ONLY use the Netro V2 API for authentication.  I have updated the integration to use the Netro API V2 ([API v2](https://netrohome.com/en/shop/user_guides/7) through the HA setup process. All other credit for this design and development belong to kcofoni and I have have kept his support link for this reason.
 
-The integration uses [Netro’s Public API](https://www.netrohome.com/en/shop/articles/10) for device access and scheduling.
+Home Assistant integration for Netro Smart Garden devices. It lets you manage Netro controllers and soil sensors to monitor conditions, control zones, and automate watering from Home Assistant.
 
 **Compatibility:** developed and tested with Home Assistant 2023.4.0 and later.
 
@@ -91,21 +91,6 @@ Polling intervals can be configured separately for sensors and controllers. A de
 > - `sensor_value_days_before_today` is used on the **next sensor update**.
 > - No manual reload or restart is required (except for internal fields like `netro_api_url`, if instructed).
 
-### 🔐 Netro Public API v2
-
-By default, the integration uses [version 1 of the Netro Public API](https://www.netrohome.com/en/shop/articles/10), which authenticates devices using their serial numbers. However, you can switch to version 2, which uses API keys generated on demand for each device.  
-API keys provide a higher level of security: they can be regenerated if compromised, unlike fixed serial numbers.
-
-To use [API v2](https://netrohome.com/en/shop/user_guides/7), simply specify the corresponding URL in your Home Assistant configuration file:
-
-```yaml
-netro_watering:
-  netro_api_url: https://api.netrohome.com/npa/v2/
-```  
-> ⚠️ **Important:**  
-> Some recent Netro devices only work with API version 2.  
-> If your device is rejected when using a serial number with API v1 (the default), carefully check the error message.  
-> It may indicate that you need to use API v2 and an API key for authentication.
 
 ## 🌦️ Netro Weather Sync Blueprint
 
