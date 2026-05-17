@@ -3,7 +3,10 @@
 DOMAIN = "netro_watering"
 MANUFACTURER = "Netro"
 
-CONF_SERIAL_NUMBER = "serial_number"
+# V2: authentication is via a 32-char encrypted API key, not a serial number.
+# The serial number is still returned by the API and stored for device identity.
+CONF_API_KEY = "api_key"
+CONF_SERIAL_NUMBER = "serial_number"   # read-only: returned by /info, used as unique_id
 CONF_DEVICE_NAME = "device_name"
 CONF_DEVICE_TYPE = "device_type"
 CONF_DEVICE_HW_VERSION = "hw_version"
@@ -95,7 +98,7 @@ GLOBAL_PARAMETERS = "parameters"
 CTRL_REFRESH_INTERVAL_MN = 5  # minutes
 DELAY_BEFORE_REFRESH = 5  # seconds
 DEFAULT_SENSOR_VALUE_DAYS_BEFORE_TODAY = 1
-DEFAULT_WATERING_DELAY = 0  # seconds, should be 0, if not null this parameter is a good way for testing and then be able to cancel the watering manually
+DEFAULT_WATERING_DELAY = 0  # seconds
 DEFAULT_WATERING_DURATION = 30  # minutes
 MAX_DELAY_BEFORE_REFRESH = 20  # seconds
 MAX_MONTHS_AFTER_SCHEDULES = 6
@@ -113,7 +116,7 @@ MIN_WATERING_DELAY = 0  # seconds
 MIN_WATERING_DURATION = 1  # minutes
 MONTHS_AFTER_SCHEDULES = 2
 MONTHS_BEFORE_SCHEDULES = 4
-NETRO_API_URL = "https://api.netrohome.com/npa/v1/"
+NETRO_API_URL = "https://api.netrohome.com/npa/v2/"  # V2 default
 SENS_REFRESH_INTERVAL_MN = 60  # minutes
 TZ_OFFSET = "+00:00"  # natively produced in UTC (do not change)
 
