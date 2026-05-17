@@ -74,9 +74,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def prepare_slowdown_factors(slowdown_factor: list) -> list | None:
-    """Convert 'from' and 'to' fields of the slowdown factor table into decimal time value in order to make it usable for getting new possible update interval."""
+    """Convert 'from' and 'to' fields of the slowdown factor table into decimal time values."""
     if slowdown_factor is not None:
-        # convert hh:mm:ss time string to decimal
         def hhmm_to_decimal(hhmm: str) -> float:
             fields = hhmm.split(":")
             hours = fields[0] if len(fields) > 0 else 0.0
@@ -94,9 +93,7 @@ def prepare_slowdown_factors(slowdown_factor: list) -> list | None:
 
 
 def get_slowdown_factor(slowdown_factors, this_time: datetime.time) -> int:
-    """Return the slowdown factor applicable to the given time, or 1 if no matching time window is found."""
-
-    # this is the default value
+    """Return the slowdown factor applicable to the given time, or 1 if none matches."""
     selected_factor = 1
 
     if slowdown_factors is not None and slowdown_factors:
@@ -118,7 +115,7 @@ def get_slowdown_factor(slowdown_factors, this_time: datetime.time) -> int:
 
 
 class Meta:
-    """Meta data returned by any Netro service related to corresponding device/sensor."""
+    """Meta data returned by any Netro service call."""
 
     def __init__(
         self,
@@ -141,9 +138,9 @@ class Meta:
 
 
 class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
-    """Coordinator for Netro sensors NPA calls."""
+    """Coordinator for Netro sensor (Whisperer) NPA v2 calls."""
 
-    # create the sensor measure attributes in order to prevent AttributeError when not yet initialized
+    # Sensor measure attributes — pre-declared to prevent AttributeError before first refresh
     id = None
     celsius = None
     moisture = None
@@ -160,20 +157,22 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         refresh_interval: int,
         sensor_value_days_before_today: int,
-        serial_number: str,
+        api_key: str,           # V2: 32-char encrypted key used to authenticate API calls
+        serial_number: str,     # V2: device serial from API response, used as HA unique_id
         device_type: str,
         device_name: str,
         hw_version: str,
         sw_version: str,
     ) -> None:
-        """Initialize my sensor coordinator."""
+        """Initialize the sensor coordinator."""
         super().__init__(
             hass,
             _LOGGER,
             name=device_name,
             update_interval=timedelta(minutes=refresh_interval),
         )
-        self.serial_number = serial_number
+        self.api_key = api_key          # auth credential for all API calls
+        self.serial_number = serial_number  # stable device identifier (not the auth key)
         self.device_type = device_type
         self.device_name = device_name
         self.hw_version = hw_version
@@ -182,10 +181,10 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return information about the device."""
+        """Return information about the sensor device."""
         return DeviceInfo(
             name=f"{self.device_name}",
-            identifiers={(DOMAIN, self.serial_number)},
+            identifiers={(DOMAIN, self.serial_number)},  # serial is the stable identifier
             manufacturer=MANUFACTURER,
             hw_version=self.hw_version,
             sw_version=self.sw_version,
@@ -194,22 +193,16 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
 
     @property
     def metadata(self) -> Meta | None:
-        """Return the meta data of the sensor."""
-        if self._metadata:
-            return self._metadata
-        return None
+        """Return the meta data from the last API response."""
+        return self._metadata if self._metadata else None
 
     @property
     def token_remaining(self) -> int | None:
-        """Return the remaining token of the sensor."""
+        """Return the remaining API call tokens for today."""
         return self.metadata.token_remaining if self.metadata is not None else None
 
     async def _async_update_data(self):
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
+        """Fetch sensor data from the Netro Public API v2."""
         _LOGGER.info(
             "Polling info for %s sensor (repeated every %d minutes)",
             self.name,
@@ -218,8 +211,9 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
 
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
+        # V2: authenticate with api_key, NOT serial_number
         res = await client.get_sensor_data(
-            self.serial_number,
+            self.api_key,
             start_date=(
                 datetime.date.today()
                 - timedelta(days=self.sensor_value_days_before_today)
@@ -227,9 +221,7 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
             end_date=datetime.date.today().strftime("%Y-%m-%d"),
         )
 
-        # get meta data
         meta_data = res["meta"]
-
         self._metadata = Meta(
             meta_data[NETRO_METADATA_LAST_ACTIVE],
             meta_data[NETRO_METADATA_TIME],
@@ -240,7 +232,6 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
             meta_data[NETRO_METADATA_TOKEN_RESET],
         )
 
-        # only take the last sensor data report
         if len(res["data"]["sensor_data"]) > 0:
             sensor_data = res["data"]["sensor_data"][0]
             self.id = sensor_data[NETRO_SENSOR_ID]
@@ -260,19 +251,15 @@ class NetroSensorUpdateCoordinator(DataUpdateCoordinator):
             self.battery_level = sensor_data[NETRO_SENSOR_BATTERY_LEVEL]
 
     def __str__(self) -> str:
-        """Convert to string, for logging in particular."""
+        """String representation for logging."""
         return f'sensor coordinator "{self.name}" ({NETRO_DEFAULT_SENSOR_MODEL})'
 
 
 class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
-    """Coordinator for Netro controllers NPA calls."""
+    """Coordinator for Netro controller NPA v2 calls."""
 
     class Zone:
-        """Zone of a Netro controller.
-
-        lists available :
-        past_schedule, coming_schedules, moistures : lists of schedules/moistures, these latter represented by a dictionary : key = str and value = any
-        """
+        """One zone (valve) managed by a Netro controller."""
 
         past_schedules = []
         coming_schedules = []
@@ -280,29 +267,35 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         def __init__(
             self,
-            controller: NetroControllerUpdateCoordinator,
+            controller: "NetroControllerUpdateCoordinator",
             ith: int,
             enabled: bool,
             smart: str,
             name: str,
             serial_number: str,
         ) -> None:
-            """Create a zone (virtual device)."""
+            """Create a zone.
+
+            ``serial_number`` here is the CONTROLLER's serial, used to build
+            the zone's virtual identifier (<controller_serial>_<ith>).  It is
+            NOT used as an API auth credential.
+            """
             self.ith = ith
             self.enabled = enabled
             self.smart = smart
             self.name = name
-            self.serial_number = serial_number + "_" + str(ith)  # virtual serial number
+            self.serial_number = serial_number + "_" + str(ith)  # virtual device id
             self.parent_controller = controller
 
         async def start_watering(
             self, duration: int, delay: int, start_time: datetime.time
         ) -> None:
-            """Start watering for the current zone for given duration in minutes."""
+            """Start watering this zone for the given duration (minutes)."""
             session = async_get_clientsession(self.parent_controller.hass)
             client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
+            # V2: authenticate with the controller's api_key
             await client.water(
-                self.parent_controller.serial_number,
+                self.parent_controller.api_key,
                 duration_minutes=duration,
                 zones=[str(self.ith)],
                 delay_minutes=delay,
@@ -314,30 +307,29 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
             )
 
         async def stop_watering(self) -> None:
-            """Stop watering (all zone included as unexpected - improvement expected)."""
+            """Stop watering (stops all zones on the controller)."""
             session = async_get_clientsession(self.parent_controller.hass)
             client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-            await client.stop_water(
-                self.parent_controller.serial_number,
-            )
+            # V2: authenticate with the controller's api_key
+            await client.stop_water(self.parent_controller.api_key)
 
         @property
         def watering(self) -> bool | None:
-            """Is the zone currently watering ?."""
+            """Return True if this zone is currently watering."""
             if self.last_run:
                 return self.last_run[NETRO_SCHEDULE_STATUS] == NETRO_SCHEDULE_EXECUTING
             return False
 
         @property
         def last_watering_status(self) -> str | None:
-            """Get the status of the last/current watering."""
+            """Return the status of the last/current watering."""
             if self.last_run:
                 return self.last_run[NETRO_SCHEDULE_STATUS]
             return None
 
         @property
         def last_watering_start(self) -> datetime.datetime | None:
-            """Get the start datetime of the last/current watering."""
+            """Return the start datetime of the last/current watering."""
             if self.last_run:
                 return datetime.datetime.fromisoformat(
                     self.last_run[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET
@@ -346,7 +338,7 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         @property
         def last_watering_end(self) -> datetime.datetime | None:
-            """Get the start datetime of the last/current watering."""
+            """Return the end datetime of the last/current watering."""
             if self.last_run:
                 return datetime.datetime.fromisoformat(
                     self.last_run[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET
@@ -355,21 +347,21 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         @property
         def last_watering_source(self) -> str | None:
-            """Get the status of the last/current watering."""
+            """Return the source of the last/current watering."""
             if self.last_run:
                 return self.last_run[NETRO_SCHEDULE_SOURCE]
             return None
 
         @property
         def next_watering_status(self) -> str | None:
-            """Get the status of the last/current watering."""
+            """Return the status of the next planned watering."""
             if self.next_run:
                 return self.next_run[NETRO_SCHEDULE_STATUS]
             return None
 
         @property
         def next_watering_start(self) -> datetime.datetime | None:
-            """Get the start datetime of the last/current watering."""
+            """Return the start datetime of the next planned watering."""
             if self.next_run:
                 return datetime.datetime.fromisoformat(
                     self.next_run[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET
@@ -378,7 +370,7 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         @property
         def next_watering_end(self) -> datetime.datetime | None:
-            """Get the start datetime of the last/current watering."""
+            """Return the end datetime of the next planned watering."""
             if self.next_run:
                 return datetime.datetime.fromisoformat(
                     self.next_run[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET
@@ -387,35 +379,29 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         @property
         def next_watering_source(self) -> str | None:
-            """Get the status of the last/current watering."""
+            """Return the source of the next planned watering."""
             if self.next_run:
                 return self.next_run[NETRO_SCHEDULE_SOURCE]
             return None
 
         @property
         def last_run(self) -> dict | None:
-            """Get the last executed/executing run."""
-            if len(self.past_schedules) != 0:
-                return self.past_schedules[0]
-            return None
+            """Return the most recent executed/executing schedule."""
+            return self.past_schedules[0] if self.past_schedules else None
 
         @property
         def next_run(self) -> dict | None:
-            """Get the next valid run to be executed in the future."""
-            if len(self.coming_schedules) != 0:
-                return self.coming_schedules[0]
-            return None
+            """Return the next upcoming valid schedule."""
+            return self.coming_schedules[0] if self.coming_schedules else None
 
         @property
         def moisture(self) -> dict | None:
-            """Get the last reported moisture."""
-            if len(self.moistures) != 0:
-                return self.moistures[0][NETRO_MOISTURE_MOISTURE]
-            return None
+            """Return the most recently reported moisture level."""
+            return self.moistures[0][NETRO_MOISTURE_MOISTURE] if self.moistures else None
 
         @property
         def token_remaining(self) -> int | None:
-            """Return the remaining token of the parent controller."""
+            """Return the remaining API tokens (delegated to the parent controller)."""
             return (
                 self.parent_controller.metadata.token_remaining
                 if self.parent_controller.metadata is not None
@@ -424,22 +410,19 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
 
         @property
         def device_info(self) -> DeviceInfo:
-            """Return information about the zone as a device. To be used when creating related entities."""
+            """Return HA device info for this zone."""
             return DeviceInfo(
                 name=(
                     f"{self.name}"
-                    if self.name  # if name is not set this is a Pixie and so we concatenate the controller name and the index of the zone
+                    if self.name
                     else f"{self.parent_controller.name} {self.ith}"
                 ),
-                identifiers={(DOMAIN, self.serial_number)},
+                identifiers={(DOMAIN, self.serial_number)},  # <controller_serial>_<ith>
                 manufacturer=MANUFACTURER,
                 model=NETRO_DEFAULT_ZONE_MODEL,
                 via_device=(DOMAIN, self.parent_controller.serial_number),
             )
 
-    # _schedules and _moistures are list of dict whose key = str and value = any
-    # _active_zones is a dictionary indexed by the zone ith and whose value is a Zone object
-    # _coming_schedules_ordered is the coming schedules oredered as generated from _schedules
     _schedules = []
     _moistures = []
 
@@ -450,145 +433,108 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
         slowdown_factors: list,
         schedules_months_before: int,
         schedules_months_after: int,
-        serial_number: str,
+        api_key: str,           # V2: 32-char encrypted key used to authenticate API calls
+        serial_number: str,     # V2: device serial from API response, used as HA unique_id
         device_type: str,
         device_name: str,
         hw_version: str,
         sw_version: str,
     ) -> None:
-        """Initialize my controller coordinator."""
+        """Initialize the controller coordinator."""
         super().__init__(
             hass,
             _LOGGER,
             name=device_name,
             update_interval=datetime.timedelta(minutes=refresh_interval),
         )
-        self.serial_number = serial_number
+        self.api_key = api_key          # auth credential for all API calls
+        self.serial_number = serial_number  # stable device identifier (not the auth key)
         self.device_type = device_type
         self.device_name = device_name
         self.hw_version = hw_version
         self.sw_version = sw_version
         self.refresh_interval = refresh_interval
         self.slowdown_factors = slowdown_factors
-        self.current_slowdown_factor = (
-            1  # will be properly calculated when calling update_data at first refresh
-        )
+        self.current_slowdown_factor = 1
         self.schedules_months_before = schedules_months_before
         self.schedules_months_after = schedules_months_after
         self._active_zones = {}
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return information about the controller as a device. To be used when creating related entities."""
+        """Return HA device info for the controller (identifier only; details set in __init__.py)."""
         return DeviceInfo(
             identifiers={(DOMAIN, self.serial_number)},
         )
 
-    def _update_from_schedules(
-        self,
-        schedules,
-    ):
-        """Schedules are spread over the active zones through two different lists : the past schedules and the coming schedules.
-
-        Each list is ordered so that the first element return the most recent past schedule and coming schedule respectively.
-        """
-        # sorting schedules on start time ascending
+    def _update_from_schedules(self, schedules):
+        """Distribute schedules across active zones."""
         self._schedules = sorted(
             schedules,
-            key=(lambda schedule: schedule[NETRO_SCHEDULE_START_TIME]),
+            key=(lambda s: s[NETRO_SCHEDULE_START_TIME]),
             reverse=False,
         )
 
         for zone_key in self._active_zones:
-            # filtering past schedules, keeping the current zone
-            past_schedules_zone_filtered = [
-                schedule
-                for schedule in schedules
-                if schedule[NETRO_SCHEDULE_ZONE] == zone_key
-                and schedule[NETRO_SCHEDULE_STATUS]
-                in [NETRO_SCHEDULE_EXECUTED, NETRO_SCHEDULE_EXECUTING]
-            ]
-
-            # sorting filtered past schedules on start time descending
-            past_schedules_zone_sorted = sorted(
-                past_schedules_zone_filtered,
-                key=(lambda schedule: schedule[NETRO_SCHEDULE_START_TIME]),
+            past = sorted(
+                [
+                    s for s in schedules
+                    if s[NETRO_SCHEDULE_ZONE] == zone_key
+                    and s[NETRO_SCHEDULE_STATUS] in (NETRO_SCHEDULE_EXECUTED, NETRO_SCHEDULE_EXECUTING)
+                ],
+                key=(lambda s: s[NETRO_SCHEDULE_START_TIME]),
                 reverse=True,
             )
-            # set the zone schedules attribute with the result
-            self._active_zones[zone_key].past_schedules = past_schedules_zone_sorted
+            self._active_zones[zone_key].past_schedules = past
 
-            # filtering coming schedules, keeping the current zone
-            coming_schedules_zone_filtered = [
-                schedule
-                for schedule in schedules
-                if schedule[NETRO_SCHEDULE_ZONE] == zone_key
-                and schedule[NETRO_SCHEDULE_STATUS] == NETRO_SCHEDULE_VALID
-                and schedule[NETRO_SCHEDULE_START_TIME]
-                > strftime("%Y-%m-%dT%H:%M:%S", gmtime())
-            ]
-
-            # sorting filtered coming schedules on start time ascending
-            coming_schedules_zone_sorted = sorted(
-                coming_schedules_zone_filtered,
-                key=(lambda schedule: schedule[NETRO_SCHEDULE_START_TIME]),
+            coming = sorted(
+                [
+                    s for s in schedules
+                    if s[NETRO_SCHEDULE_ZONE] == zone_key
+                    and s[NETRO_SCHEDULE_STATUS] == NETRO_SCHEDULE_VALID
+                    and s[NETRO_SCHEDULE_START_TIME] > strftime("%Y-%m-%dT%H:%M:%S", gmtime())
+                ],
+                key=(lambda s: s[NETRO_SCHEDULE_START_TIME]),
                 reverse=False,
             )
-            # set the zone schedules attribute with the result
-            self._active_zones[zone_key].coming_schedules = coming_schedules_zone_sorted
+            self._active_zones[zone_key].coming_schedules = coming
 
-    def _update_from_moistures(
-        self,
-        moistures,
-    ):
-        """Moistures are spread over the active zones."""
+    def _update_from_moistures(self, moistures):
+        """Distribute moisture readings across active zones."""
         self._moistures = moistures
         for zone_key in self._active_zones:
-            # filtering moistures, keeping the current zone
-            moistures_zone_filtered = [
-                moisture
-                for moisture in moistures
-                if moisture[NETRO_MOISTURE_ZONE] == zone_key
+            self._active_zones[zone_key].moistures = [
+                m for m in moistures if m[NETRO_MOISTURE_ZONE] == zone_key
             ]
-            # set the zone moistures attribute with the result
-            self._active_zones[zone_key].moistures = moistures_zone_filtered
 
     @property
     def enabled(self) -> bool:
-        """Is the controller enabled or disabled ?."""
-        return self.status in (
-            NETRO_STATUS_ONLINE,
-            NETRO_STATUS_WATERING,
-            NETRO_STATUS_SETUP,
-        )
+        """Return True when the controller is not in standby."""
+        return self.status in (NETRO_STATUS_ONLINE, NETRO_STATUS_WATERING, NETRO_STATUS_SETUP)
 
     @property
     def watering(self) -> bool:
-        """Is the controller currently watering."""
+        """Return True when the controller is actively watering."""
         return self.status == NETRO_STATUS_WATERING
 
     @property
     def active_zones(self) -> dict:
-        """Return the actives zones of the controller."""
+        """Return the dict of active zones keyed by zone index."""
         return self._active_zones
 
     @property
     def number_of_active_zones(self) -> int | None:
-        """Return the number of active zones if available."""
-        if self._active_zones:
-            return len(self._active_zones)
-        return None
+        """Return the count of active zones."""
+        return len(self._active_zones) if self._active_zones else None
 
     @property
     def metadata(self) -> Meta | None:
-        """Return the meta data of the controller."""
-        if self._metadata:
-            return self._metadata
-        return None
+        """Return the meta data from the last API response."""
+        return self._metadata if self._metadata else None
 
     @property
     def token_remaining(self) -> int | None:
-        """Return the remaining token of the controller."""
+        """Return the remaining API call tokens for today."""
         return self.metadata.token_remaining if self.metadata is not None else None
 
     def calendar_schedules(
@@ -596,43 +542,30 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
     ):
-        """Return the calendar events of the controller."""
-
+        """Return calendar events optionally filtered to a date range."""
         return [
-            self._calendar_schedule(schedule)
-            for schedule in self._schedules
+            self._calendar_schedule(s)
+            for s in self._schedules
             if (
-                datetime.datetime.fromisoformat(
-                    schedule[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET
-                )
-                > start_date
-                if start_date is not None
-                else True
+                datetime.datetime.fromisoformat(s[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET)
+                > start_date if start_date is not None else True
             )
             and (
-                datetime.datetime.fromisoformat(
-                    schedule[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET
-                )
-                < end_date
-                if end_date is not None
-                else True
+                datetime.datetime.fromisoformat(s[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET)
+                < end_date if end_date is not None else True
             )
         ]
 
     @property
     def current_calendar_schedule(self) -> dict | None:
-        """Return current or next coming schedule if any."""
-        for schedule in self._schedules:
-            if schedule[NETRO_SCHEDULE_END_TIME] > strftime(
-                "%Y-%m-%dT%H:%M:%S", gmtime()
-            ):
-                return self._calendar_schedule(schedule)
-
-        # Ensure that None is returned if no schedule is found
+        """Return the current or next upcoming schedule, if any."""
+        for s in self._schedules:
+            if s[NETRO_SCHEDULE_END_TIME] > strftime("%Y-%m-%dT%H:%M:%S", gmtime()):
+                return self._calendar_schedule(s)
         return None
 
     def _calendar_schedule(self, schedule):
-        """Return a calendar schedule dictionary from the given Netro schedule."""
+        """Build a calendar-entry dict from a raw Netro schedule dict."""
         return {
             "start": datetime.datetime.fromisoformat(
                 schedule[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET
@@ -643,115 +576,30 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
             "summary": f"{self.active_zones[schedule[NETRO_SCHEDULE_ZONE]].name}",
             "description": f"Duration: {round(
                 (
-                    datetime.datetime.fromisoformat(
-                        schedule[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET
-                    )
-                    - datetime.datetime.fromisoformat(
-                        schedule[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET
-                    )
-                ).seconds
-                / 60
+                    datetime.datetime.fromisoformat(schedule[NETRO_SCHEDULE_END_TIME] + TZ_OFFSET)
+                    - datetime.datetime.fromisoformat(schedule[NETRO_SCHEDULE_START_TIME] + TZ_OFFSET)
+                ).seconds / 60
             )} minutes, {
                 {
                     NETRO_SCHEDULE_FIX: "schedule from programs",
                     NETRO_SCHEDULE_SMART: "Netro generated schedule",
                     NETRO_SCHEDULE_MANUAL: "manual watering",
-                }[schedule[NETRO_SCHEDULE_SOURCE]]
-                if schedule[NETRO_SCHEDULE_SOURCE]
-                in (
-                    NETRO_SCHEDULE_FIX,
-                    NETRO_SCHEDULE_SMART,
-                    NETRO_SCHEDULE_MANUAL,
-                )
-                else f"unknown source({schedule[NETRO_SCHEDULE_SOURCE]})"
+                }.get(schedule[NETRO_SCHEDULE_SOURCE],
+                      f"unknown source({schedule[NETRO_SCHEDULE_SOURCE]})")
             }, {
                 {
                     NETRO_SCHEDULE_EXECUTED: "has been executed",
                     NETRO_SCHEDULE_EXECUTING: "currently being executed",
                     NETRO_SCHEDULE_VALID: "is planned",
-                }[schedule[NETRO_SCHEDULE_STATUS]]
-                if schedule[NETRO_SCHEDULE_STATUS]
-                in (
-                    NETRO_SCHEDULE_EXECUTED,
-                    NETRO_SCHEDULE_EXECUTING,
-                    NETRO_SCHEDULE_VALID,
-                )
-                else f"unknown status({schedule[NETRO_SCHEDULE_STATUS]})"
+                }.get(schedule[NETRO_SCHEDULE_STATUS],
+                      f"unknown status({schedule[NETRO_SCHEDULE_STATUS]})")
             }.",
         }
 
     async def _async_update_data(self):
-        """Fetch data from API endpoint.
+        """Fetch device info, moistures, and schedules from the Netro Public API v2."""
 
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-
-        I. The following data are actually fetched
-        ------------------------------------------
-        controller data:
-            - name
-            - status
-            - number of active zone
-
-        zone data
-            - name
-            - ith (numeric index)
-            - smart mode
-            - past and coming schedules
-
-        meta data
-            - last active time
-            - token remaining
-            - token limit
-            - token reset (date)
-            - NPA (Netro Public API) version
-
-        II. The following data are calculated
-        -------------------------------------
-        common
-            - is watering (controller and zone)
-            - is enabled (controller and zone)
-
-        zone
-            - last run (see zone.get_last_run) : date, status, start time, end time, source
-            - next run (see zone.get_next_run) : date, status, start time, end time, source
-            - last moisture (see zone.get_moisture)
-
-        controller
-            - zones, schedules, moistures
-
-        III. Subsequent platforms
-        -------------------------
-        devices
-            - controller
-            - zone
-
-        entities (entity - type - device)
-            - status - sensor - controller
-            - enabled - binary sensor - controller
-            - enabled - binary sensor - zone
-            - watering - binary sensor - controller
-            - watering - binary sensor - zone
-            - last watering start local datetime - sensor - zone
-            - last watering end local datetime - sensor - zone
-            - last watering status (executing or executed) - sensor - zone
-            - last watering event source (smart, fix, manual) - sensor - zone
-            - next watering start local datetime - sensor - zone
-            - next watering end local datetime - sensor - zone
-            - next watering status (executing or executed) - sensor - zone
-            - next watering event source (smart, fix, manual) - sensor - zone
-            - battery - sensor - controller (only for non standalone controllers (e.g. Pixie))
-            - on/off - switch - controller
-            - schedules - calendar - controller
-
-        services
-            - start watering (controller)
-            - stop watering (controller)
-            - start watering (zone)
-            - stop watering (zone)
-        """
-
-        # set update_interval according to current slowdown factor
+        # Recalculate polling interval with current slowdown factor
         self.current_slowdown_factor = get_slowdown_factor(
             self.slowdown_factors, datetime.datetime.now()
         )
@@ -760,31 +608,31 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
         )
 
         _LOGGER.debug(
-            "Current time is %s, current slowdown factor is %d, next update in %d minutes",
+            "Current time is %s, slowdown factor=%d, next update in %d minutes",
             datetime.datetime.now().time().strftime("%H:%M:%S"),
             self.current_slowdown_factor,
             self.update_interval.total_seconds() / 60,
         )
         _LOGGER.info(
-            "Polling info for %s controller (repeated every %d minutes%s)",
+            "Polling info for %s controller (every %d minutes%s)",
             self.name,
             self.update_interval.total_seconds() / 60,
             (
-                f", current slowdown factor is {self.current_slowdown_factor}"
+                f", slowdown factor={self.current_slowdown_factor}"
                 if self.current_slowdown_factor > 1
                 else ""
             ),
         )
 
-        # get main data
+        # ── GET /npa/v2/info.json ─────────────────────────────────────────
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        res = await client.get_info(self.serial_number)
+        # V2: authenticate with api_key, NOT serial_number
+        res = await client.get_info(self.api_key)
 
         device_data = res["data"]["device"]
         meta_data = res["meta"]
 
-        # pylint: disable=attribute-defined-outside-init
         self.zone_num = device_data[NETRO_CONTROLLER_ZONENUM]
         self.status = device_data[NETRO_CONTROLLER_STATUS]
         self._metadata = Meta(
@@ -799,7 +647,7 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
         if device_data.get(NETRO_CONTROLLER_BATTERY_LEVEL):
             self.battery_level = device_data[NETRO_CONTROLLER_BATTERY_LEVEL] * 100
 
-        # load the actives zones
+        # Rebuild active-zone dict from the fresh info response
         self._active_zones.clear()
         for zone in device_data[NETRO_CONTROLLER_ZONES]:
             if zone[NETRO_ZONE_ENABLED]:
@@ -810,93 +658,82 @@ class NetroControllerUpdateCoordinator(DataUpdateCoordinator):
                     zone[NETRO_ZONE_SMART],
                     (
                         zone[NETRO_ZONE_NAME]
-                        if (
-                            zone[NETRO_ZONE_NAME] is not None
-                            and len(zone[NETRO_ZONE_NAME]) > 0
-                        )
+                        if zone[NETRO_ZONE_NAME] and len(zone[NETRO_ZONE_NAME]) > 0
                         else self.device_name + "-" + str(zone[NETRO_ZONE_ITH])
                     ),
+                    # Pass serial_number (not api_key) — used as the zone identifier prefix
                     self.serial_number,
                 )
 
-        # get moistures
+        # ── GET /npa/v2/moistures.json ────────────────────────────────────
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        res = await client.get_moistures(self.serial_number)
-
-        # update controller and zone attributes from moistures
+        # V2: authenticate with api_key
+        res = await client.get_moistures(self.api_key)
         self._update_from_moistures(res["data"]["moistures"])
 
-        # get schedules
+        # ── GET /npa/v2/schedules.json ────────────────────────────────────
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
+        # V2: authenticate with api_key
         res = await client.get_schedules(
-            self.serial_number,
+            self.api_key,
             start_date=str(
-                datetime.date.today()
-                - relativedelta(months=self.schedules_months_before)
+                datetime.date.today() - relativedelta(months=self.schedules_months_before)
             ),
             end_date=str(
-                datetime.date.today()
-                + relativedelta(months=self.schedules_months_after)
+                datetime.date.today() + relativedelta(months=self.schedules_months_after)
             ),
         )
-
-        # update controller and zone attributes from schedules
         self._update_from_schedules(res["data"]["schedules"])
 
     async def enable(self):
-        """Enable controller."""
+        """Enable the controller (set status to ONLINE)."""
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        return await client.set_status(
-            self.serial_number,
-            enabled=NETRO_STATUS_ENABLE,
-        )
+        # V2: authenticate with api_key
+        return await client.set_status(self.api_key, enabled=NETRO_STATUS_ENABLE)
 
     async def disable(self):
-        """Disable controller."""
+        """Disable the controller (set status to STANDBY)."""
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        return await client.set_status(
-            self.serial_number,
-            enabled=NETRO_STATUS_DISABLE,
-        )
+        # V2: authenticate with api_key
+        return await client.set_status(self.api_key, enabled=NETRO_STATUS_DISABLE)
 
     async def no_water(self, days: int | None = None) -> None:
-        """Do not water for several days (1 if not specified)."""
+        """Suspend watering for the given number of days (default 1)."""
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        await client.no_water(
-            self.serial_number,
-            days=days if days is not None else 1,
-        )
+        # V2: authenticate with api_key
+        await client.no_water(self.api_key, days=days if days is not None else 1)
 
     async def start_watering(
         self, duration: int, delay: int, start_time: datetime.time
     ) -> None:
-        """Start watering for the current zone for given duration in minutes."""
+        """Start watering all zones for the given duration (minutes)."""
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
+        # V2: authenticate with api_key
         await client.water(
-            self.serial_number,
+            self.api_key,
             duration_minutes=duration,
             delay_minutes=delay,
             start_time=(
-                start_time.strftime("%Y-%m-%d %H:%M")
-                if start_time is not None
-                else None
+                start_time.strftime("%Y-%m-%d %H:%M") if start_time is not None else None
             ),
         )
 
     async def stop_watering(self) -> None:
-        """Stop watering (all zone included as expected)."""
+        """Stop all active watering on this controller."""
         session = async_get_clientsession(self.hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        await client.stop_water(
-            self.serial_number,
-        )
+        # V2: authenticate with api_key
+        await client.stop_water(self.api_key)
 
     def __str__(self) -> str:
-        """Convert to string, for logging in particular."""
-        return f'controller coordinator "{self.name}" ({NETRO_PIXIE_CONTROLLER_MODEL if hasattr(self, NETRO_CONTROLLER_BATTERY_LEVEL) else NETRO_SPRITE_CONTROLLER_MODEL})'
+        """String representation for logging."""
+        return (
+            f'controller coordinator "{self.name}" '
+            f"({NETRO_PIXIE_CONTROLLER_MODEL if hasattr(self, NETRO_CONTROLLER_BATTERY_LEVEL) else NETRO_SPRITE_CONTROLLER_MODEL})"
+        )
