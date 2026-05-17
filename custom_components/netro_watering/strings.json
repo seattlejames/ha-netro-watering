@@ -4,25 +4,21 @@
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     },
     "error": {
-      "invalid_serial_number": "Invalid serial number",
-      "netro_error_occurred": "Netro (NPA) returned an error for this serial number",
+      "invalid_api_key": "Invalid API key. Generate one at netrohome.com → Account → API Key",
+      "netro_error_occurred": "Netro (NPA) returned an error for this API key",
       "unknown": "[%key:common::config_flow::error::unknown%]",
       "unknown_device_type": "Unknown device type",
-      "cannot_connect": "Cannot connect to the device"
+      "cannot_connect": "Cannot connect to the Netro API"
     },
     "step": {
       "user": {
         "data": {
-          "device_name": "Device name",
-          "device_type": "Device type",
-          "serial_number": "Serial number of the device"
+          "api_key": "API Key"
         },
         "data_description": {
-          "device_name": "An optional name for your device",
-          "device_type": "The type of your device (e.g., 'Sprinkler Controller', 'Soil Sensor')",
-          "serial_number": "You can find the serial number on the device or in the Netro app"
+          "api_key": "Generate your API key at netrohome.com → Log In → Account → API Key. Each device has its own key."
         },
-        "description": "Please enter the serial number of your device",
+        "description": "Enter the API key for your Netro device (Netro Public API v2)",
         "title": "Configure Netro"
       }
     }
@@ -150,7 +146,7 @@
           "advanced": {
             "data": {
               "default_watering_delay": "Delay before irrigation starts (seconds)",
-              "delay_before_refresh": "Time to wait before data refresh (seconds",
+              "delay_before_refresh": "Time to wait before data refresh (seconds)",
               "months_after_schedules": "Months after today to get schedules",
               "months_before_schedules": "Months before today to get schedules",
               "sensor_value_days_before_today": "Days ago to fetch sensor value"
@@ -204,7 +200,7 @@
       "name": "Refresh data"
     },
     "report_weather": {
-      "description": "This is for reporting weather data, overriding system default weather data",
+      "description": "Report weather data to override Netro's default weather provider",
       "fields": {
         "condition": {
           "description": "Weather condition",
@@ -215,7 +211,7 @@
           "name": "Config entry"
         },
         "date": {
-          "description": "Weather date, can not be earlier than yesterday",
+          "description": "Weather date, cannot be earlier than yesterday",
           "name": "Date"
         },
         "humidity": {
@@ -227,7 +223,7 @@
           "name": "Pressure"
         },
         "rain": {
-          "description": "Rain fall amount (floating value in mm)",
+          "description": "Rainfall amount (floating value in mm)",
           "name": "Rain"
         },
         "rain_prob": {
@@ -235,33 +231,33 @@
           "name": "Rain probability"
         },
         "t_dew": {
-          "description": "Dew point temperature, Celsius temperature",
+          "description": "Dew point temperature in Celsius",
           "name": "Dew temperature"
         },
         "t_max": {
-          "description": "Maximum temperature, Celsius temperature",
+          "description": "Maximum temperature in Celsius",
           "name": "Maximum temperature"
         },
         "t_min": {
-          "description": "Minimum temperature, Celsius temperature",
+          "description": "Minimum temperature in Celsius",
           "name": "Minimum temperature"
         },
         "temp": {
-          "description": "Average temperature, Celsius temperature",
+          "description": "Average temperature in Celsius",
           "name": "Temperature"
         },
         "wind_speed": {
-          "description": "Wind speed, unit of m/s",
+          "description": "Wind speed in m/s",
           "name": "Wind speed"
         }
       },
       "name": "Report weather"
     },
     "set_moisture": {
-      "description": "Set moisture value to a given zone, a way to provide Netro with the value of an external sensor",
+      "description": "Set moisture value for a zone, providing Netro with an external sensor reading",
       "fields": {
         "moisture": {
-          "description": "The humidity value to be set to the zone (in %)",
+          "description": "The humidity value to set for the zone (in %)",
           "name": "Moisture"
         },
         "zone_id": {
@@ -272,7 +268,7 @@
       "name": "Set moisture"
     },
     "start_watering": {
-      "description": "Start watering for a specified duration, with an optional delay before start or a specific start date/time",
+      "description": "Start watering for a specified duration, with an optional delay or specific start time",
       "fields": {
         "delay": {
           "description": "Waiting time before starting watering",
