@@ -17,6 +17,7 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_API_KEY,               # NEW: replaces CONF_SERIAL_NUMBER as the auth credential
     CONF_CTRL_REFRESH_INTERVAL,
     CONF_DEFAULT_WATERING_DELAY,
     CONF_DELAY_BEFORE_REFRESH,
@@ -29,7 +30,7 @@ from .const import (
     CONF_MONTHS_BEFORE_SCHEDULES,
     CONF_SENS_REFRESH_INTERVAL,
     CONF_SENSOR_VALUE_DAYS_BEFORE_TODAY,
-    CONF_SERIAL_NUMBER,
+    CONF_SERIAL_NUMBER,         # KEPT: read from API response, used as device unique_id
     CONTROLLER_ADVANCED_OPTIONS_COLLAPSED,
     CONTROLLER_DEVICE_TYPE,
     CTRL_REFRESH_INTERVAL_MN,
@@ -65,104 +66,112 @@ _LOGGER = logging.getLogger(__name__)
 
 # mypy: disable-error-code="return"
 
-# a "serial number" has to be provided for identifying the device.
+# V2: the user enters the 32-char encrypted API key generated at
+# netrohome.com → Account → API Key.  We render it as a password field
+# so the key is masked in the UI.
 DEVICE_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_SERIAL_NUMBER): selector.TextSelector(),
+        vol.Required(CONF_API_KEY): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+        ),
     }
 )
 
 
 class PlaceholderHub:
-    """Temporary class used for testing Netro device information retrieval.
+    """Probe the Netro Public API v2 with the supplied API key.
 
-    Simulates device API calls and provides access to device attributes.
+    V2: authenticates with the 32-char encrypted API key rather than the
+    device serial number.  The serial number is read back from the API
+    response and stored separately so it can be used as the stable HA
+    device identifier independently of any future key rotation.
     """
 
-    def __init__(self, serial: str) -> None:
-        """Initialize."""
-        self.serial = serial
+    def __init__(self, api_key: str) -> None:
+        """Initialize with the V2 API key."""
+        self.api_key = api_key
         self.info: dict[str, Any] | None = None
 
     async def check(self, hass: HomeAssistant) -> bool:
-        """Check if we can get information from the serial number."""
+        """Verify the API key and retrieve device info from the Netro API."""
         session = async_get_clientsession(hass)
         client = NetroClient(http=AiohttpClient(session), config=NetroConfig())
-        self.info = await client.get_info(self.serial)
+        # V2: api_key is the auth credential; serial is returned inside the response
+        self.info = await client.get_info(self.api_key)
         return self.info is not None
 
     def is_a_controller(self) -> bool:
-        """Check if the device is a controller."""
+        """Return True if the API key belongs to a controller device."""
         return self.info["data"].get("device") is not None
 
     def is_a_sensor(self) -> bool:
-        """Check if the device is a sensor."""
+        """Return True if the API key belongs to a soil sensor."""
         return self.info["data"].get("sensor") is not None
 
     def get_device_type(self) -> str | None:
-        """Give the type of the device, controller or sensor."""
+        """Return the device type string: CONTROLLER_DEVICE_TYPE or SENSOR_DEVICE_TYPE."""
         if self.is_a_sensor():
             return SENSOR_DEVICE_TYPE
         if self.is_a_controller():
             return CONTROLLER_DEVICE_TYPE
         return None
 
-    def get_name(self) -> str:
-        """Give the name of the device, if any."""
-        name: str
+    def get_serial(self) -> str:
+        """Return the device serial number as reported by the API.
+
+        In V2 the serial is embedded in the info response body rather than
+        being derived from the auth credential.
+        """
         if self.is_a_sensor():
-            name = self.info["data"]["sensor"]["name"]
-        elif self.is_a_controller():
-            name = self.info["data"]["device"]["name"]
-        return name
+            return self.info["data"]["sensor"]["serial"]
+        return self.info["data"]["device"]["serial"]
+
+    def get_name(self) -> str:
+        """Return the device name."""
+        if self.is_a_sensor():
+            return self.info["data"]["sensor"]["name"]
+        return self.info["data"]["device"]["name"]
 
     def get_hw_version(self) -> str:
-        """Give the software version of the device."""
-        hw_version: str
+        """Return the hardware version of the device."""
         if self.is_a_sensor():
-            hw_version = self.info["data"]["sensor"]["version"]
-        elif self.is_a_controller():
-            hw_version = self.info["data"]["device"]["version"]
-        return hw_version
+            return self.info["data"]["sensor"]["version"]
+        return self.info["data"]["device"]["version"]
 
     def get_sw_version(self) -> str:
-        """Give the software version of the device."""
-        sw_version: str
+        """Return the firmware version of the device."""
         if self.is_a_sensor():
-            sw_version = self.info["data"]["sensor"]["sw_version"]
-        elif self.is_a_controller():
-            sw_version = self.info["data"]["device"]["sw_version"]
-        return sw_version
+            return self.info["data"]["sensor"]["sw_version"]
+        return self.info["data"]["device"]["sw_version"]
 
 
-def _normalize_serial(value: str) -> str:
-    """Normalize the serial number for comparisons."""
-    return str(value).strip().replace(" ", "").upper()
+def _normalize_api_key(value: str) -> str:
+    """Strip surrounding whitespace from a V2 API key.
+
+    V2 keys are base64url-encoded and CASE-SENSITIVE — do not uppercase them.
+    """
+    return str(value).strip()
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect.
+    """Validate the user-supplied API key and return the device metadata.
 
-    1. Check that the serial number is correct by requesting Netro Public API
-    4. Determine the type of the device (controller or sensor) and fulfill the returned dict with it
-    5. also return the name to be given to the config entry (config name).
-
-    Data has the keys from DEVICE_SCHEMA with values provided by the user.
+    1. Probe the Netro Public API v2 with the supplied key.
+    2. Determine the device type (controller or sensor).
+    3. Return a dict that stores BOTH the api_key (for all future API calls)
+       and the serial_number (read from the response, used as the stable HA
+       device identifier so the device survives key rotation).
     """
-    # If your PyPI package is not built with async, pass your methods
-    # to the executor:
-    # await hass.async_add_executor_job(
-    #     your_validate_func
-    # )
-
-    serial = _normalize_serial(data[CONF_SERIAL_NUMBER])
-    hub = PlaceholderHub(serial)
+    api_key = _normalize_api_key(data[CONF_API_KEY])
+    hub = PlaceholderHub(api_key)
     ok = await hub.check(hass)
     if not ok:
         raise CannotConnect
+
     return {
+        CONF_API_KEY: api_key,                  # persisted for all future API calls
+        CONF_SERIAL_NUMBER: hub.get_serial(),   # from the response; used as unique_id
         CONF_DEVICE_TYPE: hub.get_device_type(),
-        CONF_SERIAL_NUMBER: serial,
         CONF_DEVICE_NAME: hub.get_name(),
         CONF_DEVICE_HW_VERSION: hub.get_hw_version(),
         CONF_DEVICE_SW_VERSION: hub.get_sw_version(),
@@ -175,10 +184,7 @@ class NetroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def is_matching(self, other_flow: dict[str, Any]) -> bool:
-        """Check if this integration matches the discovery info."""
-        # As this integration does not support automatic discovery,
-        # we return False
-
+        """This integration does not support automatic discovery."""
         return False
 
     @staticmethod
@@ -194,31 +200,40 @@ class NetroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle the initial step."""
         errors: dict[str, str] = {}
-        if user_input is not None:
-            serial = _normalize_serial(user_input[CONF_SERIAL_NUMBER])
 
-            # 1) Prevent duplicates across device types: compare to the serial stored in data
+        if user_input is not None:
+            api_key = _normalize_api_key(user_input[CONF_API_KEY])
+
+            # Fast-path: abort without hitting the network if this exact key
+            # is already registered.
             for entry in self._async_current_entries():
-                if _normalize_serial(entry.data.get(CONF_SERIAL_NUMBER, "")) == serial:
+                if _normalize_api_key(entry.data.get(CONF_API_KEY, "")) == api_key:
                     return self.async_abort(reason="already_configured")
 
             try:
                 config_item = await validate_input(self.hass, user_input)
             except NetroInvalidKey:
-                _LOGGER.warning("Invalid serial number: %s", mask(serial))
-                errors["base"] = "invalid_serial_number"
+                _LOGGER.warning("Invalid API key supplied: %s", mask(api_key))
+                errors["base"] = "invalid_api_key"
             except NetroException:
                 _LOGGER.exception(
-                    "Unexpected Netro API exception for serial: %s", mask(serial)
+                    "Unexpected Netro API exception for key: %s", mask(api_key)
                 )
                 errors["base"] = "netro_error_occurred"
             except CannotConnect:
-                _LOGGER.exception("Cannot connect for serial: %s", mask(serial))
+                _LOGGER.exception("Cannot connect for key: %s", mask(api_key))
                 errors["base"] = "cannot_connect"
             except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception for serial: %s", mask(serial))
+                _LOGGER.exception("Unexpected exception for key: %s", mask(api_key))
                 errors["base"] = "unknown"
             else:
+                # Secondary check: abort if the physical device (by serial) is
+                # already registered, e.g. added previously with a different key.
+                serial = config_item[CONF_SERIAL_NUMBER]
+                for entry in self._async_current_entries():
+                    if entry.data.get(CONF_SERIAL_NUMBER, "") == serial:
+                        return self.async_abort(reason="already_configured")
+
                 return self.async_create_entry(
                     title=config_item[CONF_DEVICE_NAME], data=config_item
                 )
@@ -242,21 +257,14 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step of the options flow.
-
-        Presents the options form to the user and processes input to update config entry options.
-        """
+        """Handle the initial step of the options flow."""
         if user_input is not None:
-            # Extract and flatten the section
             advanced = user_input.pop("advanced", {})
             if isinstance(advanced, dict):
                 user_input.update(advanced)
-
-            # No manual reload needed: OptionsFlowWithReload will do it.
             new_options = {**self.config_entry.options, **user_input}
             return self.async_create_entry(title="", data=new_options)
 
-        # Fallbacks from options or YAML (backward compatibility)
         gp = self._gp()
         opt = self.config_entry.options
 
@@ -356,7 +364,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             return self.async_show_form(step_id="init", data_schema=schema)
 
         if self.config_entry.data[CONF_DEVICE_TYPE] == SENSOR_DEVICE_TYPE:
-            # For a sensor device, only certain advanced fields are relevant
             advanced_schema = vol.Schema(
                 {
                     vol.Optional(
